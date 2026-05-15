@@ -205,14 +205,17 @@ impl<UP: UserPresence, T: TrussedRequirements> Authenticator for crate::Authenti
         // 7. reset timer
         // 8. increment credential counter (not applicable)
 
-        self.assert_with_credential(None, Credential::Full(credential))
+        let mut response = ctap2::get_assertion::Response::empty();
+        self.assert_with_credential(None, &Credential::Full(credential), &mut response)?;
+        Ok(response)
     }
 
     #[inline(never)]
-    fn make_credential(
+    fn make_credential_into(
         &mut self,
         parameters: &ctap2::make_credential::Request,
-    ) -> Result<ctap2::make_credential::Response> {
+        response: &mut ctap2::make_credential::Response,
+    ) -> Result<()> {
         // CTAP 2.1 §6.1.1.2: rp.id must be present and non-empty.
         if parameters.rp.id.is_empty() {
             return Err(Error::MissingParameter);
@@ -625,16 +628,13 @@ impl<UP: UserPresence, T: TrussedRequirements> Authenticator for crate::Authenti
             info_now!("deleted private credential key: {}", _success);
         }
 
-        let mut attestation_object = ctap2::make_credential::ResponseBuilder {
-            fmt: att_stmt_fmt
-                .map(From::from)
-                .unwrap_or(AttestationStatementFormat::None),
-            auth_data: serialized_auth_data,
-        }
-        .build();
-        attestation_object.att_stmt = att_stmt;
-        attestation_object.large_blob_key = large_blob_key;
-        Ok(attestation_object)
+        response.fmt = att_stmt_fmt
+            .map(From::from)
+            .unwrap_or(AttestationStatementFormat::None);
+        response.auth_data = serialized_auth_data;
+        response.att_stmt = att_stmt;
+        response.large_blob_key = large_blob_key;
+        Ok(())
     }
 
     #[inline(never)]
@@ -1233,10 +1233,11 @@ impl<UP: UserPresence, T: TrussedRequirements> Authenticator for crate::Authenti
     }
 
     #[inline(never)]
-    fn get_assertion(
+    fn get_assertion_into(
         &mut self,
         parameters: &ctap2::get_assertion::Request,
-    ) -> Result<ctap2::get_assertion::Response> {
+        response: &mut ctap2::get_assertion::Response,
+    ) -> Result<()> {
         debug_now!("remaining stack size: {} bytes", msp() - 0x2000_0000);
 
         // CTAP 2.1 §6.2.1.2: rpId must be present and non-empty.
@@ -1345,7 +1346,7 @@ impl<UP: UserPresence, T: TrussedRequirements> Authenticator for crate::Authenti
             n => Some(n),
         };
 
-        self.assert_with_credential(num_credentials, credential)
+        self.assert_with_credential(num_credentials, &credential, response)
     }
 
     #[inline(never)]
@@ -2074,8 +2075,9 @@ impl<UP: UserPresence, T: TrussedRequirements> crate::Authenticator<UP, T> {
     fn assert_with_credential(
         &mut self,
         num_credentials: Option<u32>,
-        credential: Credential,
-    ) -> Result<ctap2::get_assertion::Response> {
+        credential: &Credential,
+        response: &mut ctap2::get_assertion::Response,
+    ) -> Result<()> {
         let data = self.state.runtime.active_get_assertion.clone().unwrap();
         let rp_id_hash = &data.rp_id_hash;
 
@@ -2112,7 +2114,7 @@ impl<UP: UserPresence, T: TrussedRequirements> crate::Authenticator<UP, T> {
                 }
                 large_blob_key_requested = extensions.large_blob_key == Some(true);
             }
-            self.process_assertion_extensions(&data, extensions, &credential, key)?
+            self.process_assertion_extensions(&data, extensions, credential, key)?
         } else {
             None
         };
@@ -2217,18 +2219,15 @@ impl<UP: UserPresence, T: TrussedRequirements> crate::Authenticator<UP, T> {
             syscall!(self.trussed.delete(key));
         }
 
-        let mut response = ctap2::get_assertion::ResponseBuilder {
-            credential: credential_id.into(),
-            auth_data: serialized_auth_data,
-            signature,
-        }
-        .build();
+        response.credential = credential_id.into();
+        response.auth_data = serialized_auth_data;
+        response.signature = signature;
         response.number_of_credentials = num_credentials;
         response.att_stmt = att_stmt;
 
         // User with empty IDs are ignored for compatibility
         if is_rk {
-            if let Credential::Full(credential) = &credential {
+            if let Credential::Full(credential) = credential {
                 if !credential.user.id().is_empty() {
                     let mut user: PublicKeyCredentialUserEntity = credential.user.clone().into();
                     // User identifiable information (name, DisplayName, icon) MUST not
@@ -2252,7 +2251,7 @@ impl<UP: UserPresence, T: TrussedRequirements> crate::Authenticator<UP, T> {
             }
         }
 
-        Ok(response)
+        Ok(())
     }
 
     #[inline(never)]
