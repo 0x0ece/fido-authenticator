@@ -527,6 +527,17 @@ impl<UP: UserPresence, T: TrussedRequirements> Authenticator for crate::Authenti
                         None,
                     ));
                     key_store_full = result.is_err();
+                    if result.is_ok() {
+                        // A new RK file landed on disk: keep the O(1)
+                        // resident-count cache in sync. (Any same-RP/same-user
+                        // RK was already removed above, whose delete path
+                        // decrements the counter, so this net-counts correctly
+                        // across overwrite.) A persist failure here must not fail
+                        // the otherwise-successful MakeCredential, so the error
+                        // is intentionally dropped — the lazy backfill will
+                        // re-derive the true count if the cache ever drifts to 0.
+                        self.state.persistent.rk_count_inc(&mut self.trussed).ok();
+                    }
                 }
 
                 if key_store_full {
@@ -2392,6 +2403,9 @@ impl<UP: UserPresence, T: TrussedRequirements> crate::Authenticator<UP, T> {
                         }
                     }
                     syscall!(self.trussed.remove_file(Location::Internal, rk_path,));
+                    // Keep the O(1) resident-count cache in sync; persist
+                    // failure must not abort the delete, so the error is dropped.
+                    self.state.persistent.rk_count_dec(&mut self.trussed).ok();
 
                     info_now!("Overwriting previous rk tied to this userId.");
                     break;
@@ -2435,6 +2449,9 @@ impl<UP: UserPresence, T: TrussedRequirements> crate::Authenticator<UP, T> {
         syscall!(self
             .trussed
             .remove_file(Location::Internal, PathBuf::from(rk_path),));
+        // Keep the O(1) resident-count cache in sync; persist failure must not
+        // abort the delete, so the error is intentionally dropped.
+        self.state.persistent.rk_count_dec(&mut self.trussed).ok();
 
         Ok(())
     }

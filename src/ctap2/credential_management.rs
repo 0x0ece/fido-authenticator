@@ -96,7 +96,40 @@ where
         Ok(response)
     }
 
+    /// Number of resident credentials.
+    ///
+    /// Returns the O(1) cached counter from persistent state. Historically this
+    /// walked the entire `rk/` directory on every call, and `make_credential`
+    /// calls it for each RK creation to enforce `max_resident_credential_count`
+    /// — so the walk made MakeCredential latency grow with the number of stored
+    /// credentials. The counter removes that walk.
+    ///
+    /// A cached value of `0` is ambiguous: either the device genuinely has no
+    /// RKs, or the state file predates the counter (loaded as `0` via
+    /// `#[serde(default)]`). To stay correct across upgrades, a `0` triggers a
+    /// one-time walk; if it finds credentials, the real count is persisted so
+    /// the walk never repeats.
     pub fn count_credentials(&mut self) -> Result<u32> {
+        let cached = self.authnr.state.persistent.rk_count();
+        if cached != 0 {
+            return Ok(cached);
+        }
+        let walked = self.count_credentials_walk()?;
+        if walked != 0 {
+            // Backfill once; ignore persist errors (we still return the right
+            // value now, and a later op will retry the backfill if needed).
+            self.authnr
+                .state
+                .persistent
+                .rk_count_set(&mut self.authnr.trussed, walked)
+                .ok();
+        }
+        Ok(walked)
+    }
+
+    /// Full walk of the `rk/` directory. O(N). Used only as the lazy-backfill
+    /// fallback for `count_credentials` when the cached counter is `0`.
+    fn count_credentials_walk(&mut self) -> Result<u32> {
         let dir = PathBuf::from(RK_DIR);
         let mut num_rks = 0;
 

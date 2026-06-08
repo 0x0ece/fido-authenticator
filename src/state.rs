@@ -306,6 +306,21 @@ pub struct PersistentState {
     /// rejected with `PinRequired`.
     #[serde(default)]
     always_uv: bool,
+
+    /// Cached number of resident (discoverable) credentials on disk.
+    ///
+    /// `count_credentials` would otherwise walk the whole `rk/` tree on every
+    /// call, which `make_credential` does for *each* RK creation to enforce
+    /// `max_resident_credential_count`. That walk is O(N) per call and grows
+    /// MakeCredential latency linearly with the number of stored credentials
+    /// (measured: ~285 ms at 0 creds rising past 580 ms by ~25 creds on LPC55).
+    /// Maintaining a counter makes the count O(1).
+    ///
+    /// `#[serde(default)]` so state files written before this field existed load
+    /// as `0`; a `0` value triggers a one-time lazy backfill walk (see
+    /// `credential_management::count_credentials`) that persists the real count.
+    #[serde(default)]
+    rk_count: u32,
 }
 
 impl PersistentState {
@@ -329,6 +344,7 @@ impl PersistentState {
             min_pin_length_rp_ids: Vec::new(),
             force_pin_change: false,
             always_uv: false,
+            rk_count: 0,
         }
     }
 
@@ -367,6 +383,35 @@ impl PersistentState {
             None,
         ));
         Ok(())
+    }
+
+    /// Cached count of resident credentials. May be `0` on a state file written
+    /// before the counter existed; callers must treat `0` as "unknown, walk to
+    /// backfill" (see `credential_management::count_credentials`).
+    pub fn rk_count(&self) -> u32 {
+        self.rk_count
+    }
+
+    /// Increment the resident-credential counter and persist. Call after a new
+    /// RK file is successfully written.
+    pub fn rk_count_inc<T: FilesystemClient>(&mut self, trussed: &mut T) -> Result<()> {
+        self.rk_count = self.rk_count.saturating_add(1);
+        self.save(trussed)
+    }
+
+    /// Decrement the resident-credential counter and persist. Call after an RK
+    /// file is successfully deleted. Saturates at 0.
+    pub fn rk_count_dec<T: FilesystemClient>(&mut self, trussed: &mut T) -> Result<()> {
+        self.rk_count = self.rk_count.saturating_sub(1);
+        self.save(trussed)
+    }
+
+    /// Set the resident-credential counter to a known value and persist. Used by
+    /// the one-time lazy backfill when an older state file is loaded with
+    /// `rk_count == 0` but RK files exist on disk.
+    pub fn rk_count_set<T: FilesystemClient>(&mut self, trussed: &mut T, n: u32) -> Result<()> {
+        self.rk_count = n;
+        self.save(trussed)
     }
 
     pub fn reset<T: CryptoClient + FilesystemClient>(
